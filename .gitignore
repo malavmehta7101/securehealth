@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# AWS SAM
+.aws-sam/
+samconfig.toml.bak
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Secrets & env — never commit
+.env
+.env.*
+*.pem
+*.key
+aws-exports.js
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

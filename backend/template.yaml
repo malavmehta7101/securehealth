@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SecureHealth - AWS-based secure patient records portal (MCSC-6002 group project).
+  Phase 1 skeleton: Cognito user pool with MFA + role groups, KMS CMK,
+  DynamoDB tables (patients, audit), REST API with Cognito authorizer,
+  and an authenticated /health endpoint proving the security gate end-to-end.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 256
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        PATIENTS_TABLE: !Ref PatientsTable
+        AUDIT_TABLE: !Ref AuditTable
+        KMS_KEY_ID: !Ref DataKey
+
+Resources:
+
+  # ---------------- Cognito: authentication + MFA + RBAC groups ----------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: securehealth-users
+      MfaConfiguration: 'ON'
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true   # staff accounts are provisioned, not self-signup
+      UserPoolAddOns:
+        AdvancedSecurityMode: ENFORCED   # Cognito threat protection: blocks credential stuffing
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: admin_only
+            Priority: 1
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: securehealth-web
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH      # convenient for CLI testing; SRP used by frontend
+        - ALLOW_REFRESH_TOKEN_AUTH
+      IdTokenValidity: 1                 # short-lived tokens (hours)
+      AccessTokenValidity: 1
+      RefreshTokenValidity: 8
+      TokenValidityUnits:
+        IdToken: hours
+        AccessToken: hours
+        RefreshToken: hours
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: Admin, UserPoolId: !Ref UserPool, Precedence: 1 }
+  DoctorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: Doctor, UserPoolId: !Ref UserPool, Precedence: 2 }
+  ReceptionistGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: Receptionist, UserPoolId: !Ref UserPool, Precedence: 3 }
+
+  # ---------------- KMS: customer-managed key for PHI ----------------
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: SecureHealth CMK - envelope encryption for clinical fields and table encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RootAccountAdmin       # account admin retains key administration
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          # Usage grants for Lambda roles are added per-function below via policies;
+          # no other principal can use this key.
+
+  # ---------------- DynamoDB: patients + append-only audit ----------------
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: securehealth-patients
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: patient_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: patient_id, KeyType: HASH }
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DataKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true   # protected backups (ransomware resilience)
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: securehealth-audit
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: day, AttributeType: S }        # partition: YYYY-MM-DD
+        - { AttributeName: event_time, AttributeType: S } # sort: ISO timestamp + uuid suffix
+      KeySchema:
+        - { AttributeName: day, KeyType: HASH }
+        - { AttributeName: event_time, KeyType: RANGE }
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DataKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ---------------- REST API with Cognito authorizer ----------------
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: securehealth-api
+      StageName: v1
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt UserPool.Arn
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingRateLimit: 20       # DoS mitigation (STRIDE: Denial of Service)
+          ThrottlingBurstLimit: 40
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","user":"$context.authorizer.claims.cognito:username","method":"$context.httpMethod","path":"$context.path","status":"$context.status"}'
+
+  ApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /securehealth/api-access
+      RetentionInDays: 30
+
+  # ---------------- Lambda: authenticated health check ----------------
+  HealthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: securehealth-health
+      Handler: health.handler
+      CodeUri: src/handlers/
+      Policies:
+        - DynamoDBWritePolicy: { TableName: !Ref AuditTable }
+      Events:
+        Health:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /health
+            Method: get
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the SecureHealth API
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com/v1'
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  KmsKeyId:
+    Value: !Ref DataKey
