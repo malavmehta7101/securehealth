@@ -91,9 +91,6 @@ def main():
     token = resp["AuthenticationResult"]["IdToken"]
     print("\n=== IdToken (expires in 1 hour) ===")
     print(token)
-    with open("token.txt", "w") as f:
-        f.write(token)
-    print("\nSaved to token.txt")
     print("\nTest it with:")
     print(f'  curl.exe -i https://z4pz9ha8j6.execute-api.{REGION}.amazonaws.com/v1/health -H "Authorization: Bearer <token>"')
 

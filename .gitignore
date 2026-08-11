@@ -24,4 +24,8 @@ aws-exports.js
 .vscode/
 .idea/
 .DS_Store
+
+# Test artefacts — live tokens, never commit
+.test-env
 token.txt
+.pytest_cache/

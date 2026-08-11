@@ -40,41 +40,6 @@ all point at his stack outputs.
 (ApiUrl, UserPoolId, ClientId) lives in `frontend/.env.local`, which is
 gitignored — Malav shares the canonical demo values in the team chat, not in git.
 
-## One-time AWS account setup (each member, before first deploy)
-
-API Gateway can only write access logs if an account-level CloudWatch role is
-registered. This is per AWS account + region, not per stack, so every member
-runs it once. Skipping it makes `sam deploy` fail with
-"CloudWatch Logs role ARN must be set in account settings".
-
-```powershell
-# 1. Trust policy file
-@'
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"apigateway.amazonaws.com"},"Action":"sts:AssumeRole"}]}
-'@ | Out-File -Encoding ascii trust-policy.json
-
-# 2. Create the role
-aws iam create-role --role-name APIGatewayCloudWatchLogs --assume-role-policy-document file://trust-policy.json
-
-# 3. Attach the managed policy
-aws iam attach-role-policy --role-name APIGatewayCloudWatchLogs --policy-arn arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
-
-# 4. Wait ~30s for IAM propagation, then register it (replace ACCOUNT_ID with your own)
-aws apigateway update-account --patch-operations op=replace,path=/cloudwatchRoleArn,value=arn:aws:iam::ACCOUNT_ID:role/APIGatewayCloudWatchLogs --region ca-central-1
-```
-
-Your ACCOUNT_ID: `aws sts get-caller-identity --query Account --output text`
-
-## Troubleshooting
-
-- **`sam: command not found` in Git Bash** — the installer ships `sam.cmd`; use PowerShell, or `alias sam='sam.cmd'`.
-- **Stack stuck in ROLLBACK_COMPLETE** — it can't be updated, only deleted:
-  `aws cloudformation delete-stack --stack-name securehealth --region ca-central-1`, then
-  `aws cloudformation wait stack-delete-complete --stack-name securehealth --region ca-central-1`, then redeploy.
-- **Python runtime mismatch on `sam build`** — the template targets python3.13; install it or adjust `Runtime:` to a version you have.
-- **502 from an endpoint** — check `sam logs --stack-name securehealth --region ca-central-1`. KMS AccessDenied means the function's IAM policy is missing `kms:Decrypt` / `kms:GenerateDataKey` on the CMK.
-- **Use your OWN AWS account.** Malav's stack is the canonical demo environment; don't deploy into it.
-  
 ## Deploy the skeleton (Phase 1 gate)
 
 ```bash

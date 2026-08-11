@@ -57,6 +57,7 @@ def response(status, body):
             "Content-Type": "application/json",
             "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
             "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
             "Cache-Control": "no-store",
         },
         "body": json.dumps(body),
