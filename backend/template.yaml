@@ -150,13 +150,8 @@ Resources:
     Properties:
       Name: securehealth-api
       StageName: v1
-      Cors:
-        AllowMethods: "'GET,POST,PUT,OPTIONS'"
-        AllowHeaders: "'Content-Type,Authorization'"
-        AllowOrigin: "'*'"
       Auth:
         DefaultAuthorizer: CognitoAuth
-        AddDefaultAuthorizerToCorsPreflight: false
         Authorizers:
           CognitoAuth:
             UserPoolArn: !GetAtt UserPool.Arn
@@ -250,6 +245,297 @@ Resources:
           Type: Api
           Properties: { RestApiId: !Ref Api, Path: /audit, Method: get }
 
+  # ============================================================================
+  # Monitoring & alerting
+  # ============================================================================
+
+  # --- Notification channel for security alarms -------------------------------
+  SecurityAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: securehealth-security-alerts
+      DisplayName: SecureHealth Security Alerts
+
+  # --- Metric filters: turn structured log lines into custom metrics -----------
+  # Each SECURITY_EVENT line printed by common.emit_security_event() is parsed
+  # here. This keeps the Lambda hot path free of PutMetricData calls.
+
+  DeniedAccessMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${PatientsFunction}'
+      FilterPattern: '{ $.event = "SECURITY_EVENT" && $.denied IS TRUE }'
+      MetricTransformations:
+        - MetricNamespace: SecureHealth/Security
+          MetricName: DeniedAccessAttempts
+          MetricValue: '1'
+          DefaultValue: 0
+
+  TamperDetectedMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${PatientsFunction}'
+      FilterPattern: '{ $.action = "TAMPER_DETECTED" }'
+      MetricTransformations:
+        - MetricNamespace: SecureHealth/Security
+          MetricName: TamperDetections
+          MetricValue: '1'
+          DefaultValue: 0
+
+  ValidationRejectMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${PatientsFunction}'
+      FilterPattern: '{ $.action = "VALIDATION_REJECT" }'
+      MetricTransformations:
+        - MetricNamespace: SecureHealth/Security
+          MetricName: ValidationRejections
+          MetricValue: '1'
+          DefaultValue: 0
+
+  PhiAccessMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${PatientsFunction}'
+      FilterPattern: '{ $.event = "SECURITY_EVENT" && ($.action = "PATIENT_READ" || $.action = "PATIENT_SEARCH") && $.outcome = "OK" }'
+      MetricTransformations:
+        - MetricNamespace: SecureHealth/Security
+          MetricName: PhiAccessEvents
+          MetricValue: '1'
+          DefaultValue: 0
+
+  AuditReadDeniedMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AuditFunction}'
+      FilterPattern: '{ $.action = "AUDIT_READ" && $.denied IS TRUE }'
+      MetricTransformations:
+        - MetricNamespace: SecureHealth/Security
+          MetricName: AuditReadDenied
+          MetricValue: '1'
+          DefaultValue: 0
+
+  # --- Alarms -----------------------------------------------------------------
+
+  # Any tamper detection is a single-event alarm: one is already too many.
+  TamperAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-RecordTamperDetected
+      AlarmDescription: A patient record failed SHA-256 integrity verification.
+      Namespace: SecureHealth/Security
+      MetricName: TamperDetections
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopic]
+
+  # Repeated denials suggest probing or a misconfigured client.
+  DeniedAccessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-RepeatedAccessDenials
+      AlarmDescription: Five or more denied access attempts within five minutes.
+      Namespace: SecureHealth/Security
+      MetricName: DeniedAccessAttempts
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopic]
+
+  # A burst of rejections looks like automated payload probing.
+  ValidationRejectAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-InputAttackProbing
+      AlarmDescription: Ten or more input validation rejections within five minutes.
+      Namespace: SecureHealth/Security
+      MetricName: ValidationRejections
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopic]
+
+  # Availability: sustained 5xx means the API is failing, not just being probed.
+  ApiServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-ApiServerErrors
+      AlarmDescription: API Gateway returned five or more 5xx responses in five minutes.
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - { Name: ApiName, Value: securehealth-api }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopic]
+
+  # Throttling indicates the DoS control is engaging.
+  ApiThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-ApiThrottling
+      AlarmDescription: API Gateway throttled twenty or more requests in five minutes.
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - { Name: ApiName, Value: securehealth-api }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 20
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopic]
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-PatientsFunctionErrors
+      AlarmDescription: The patients function raised three or more errors in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: securehealth-patients }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SecurityAlertTopic]
+
+  # --- Dashboard --------------------------------------------------------------
+  SecurityDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: SecureHealth-Security
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": {
+                "markdown": "# SecureHealth - Security Operations\n**Region:** ${AWS::Region} | PHI access, denied attempts, integrity alerts and API health. Alarms publish to the `securehealth-security-alerts` SNS topic."
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 2, "width": 8, "height": 6,
+              "properties": {
+                "title": "Integrity alerts (tamper detected)",
+                "metrics": [["SecureHealth/Security", "TamperDetections", {"color": "#d13212"}]],
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "region": "${AWS::Region}",
+                "annotations": {"horizontal": [{"label": "Alarm", "value": 1, "color": "#d13212"}]}
+              }
+            },
+            {
+              "type": "metric", "x": 8, "y": 2, "width": 8, "height": 6,
+              "properties": {
+                "title": "Denied access attempts (RBAC)",
+                "metrics": [
+                  ["SecureHealth/Security", "DeniedAccessAttempts", {"color": "#ff7f0e"}],
+                  ["SecureHealth/Security", "AuditReadDenied", {"color": "#9467bd"}]
+                ],
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "region": "${AWS::Region}",
+                "annotations": {"horizontal": [{"label": "Alarm", "value": 5, "color": "#ff7f0e"}]}
+              }
+            },
+            {
+              "type": "metric", "x": 16, "y": 2, "width": 8, "height": 6,
+              "properties": {
+                "title": "Input validation rejections (attack probing)",
+                "metrics": [["SecureHealth/Security", "ValidationRejections", {"color": "#e377c2"}]],
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "region": "${AWS::Region}",
+                "annotations": {"horizontal": [{"label": "Alarm", "value": 10, "color": "#e377c2"}]}
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "PHI access volume (successful reads and searches)",
+                "metrics": [["SecureHealth/Security", "PhiAccessEvents", {"color": "#1f77b4"}]],
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "API Gateway - requests and errors",
+                "metrics": [
+                  ["AWS/ApiGateway", "Count", "ApiName", "securehealth-api", {"label": "Requests"}],
+                  [".", "4XXError", ".", ".", {"label": "4xx (auth/validation)", "color": "#ff7f0e"}],
+                  [".", "5XXError", ".", ".", {"label": "5xx (server)", "color": "#d13212"}]
+                ],
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 14, "width": 8, "height": 6,
+              "properties": {
+                "title": "Lambda invocations and errors",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "securehealth-patients"],
+                  [".", "Errors", ".", ".", {"color": "#d13212"}]
+                ],
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric", "x": 8, "y": 14, "width": 8, "height": 6,
+              "properties": {
+                "title": "API latency (p50 / p99)",
+                "metrics": [
+                  ["AWS/ApiGateway", "Latency", "ApiName", "securehealth-api", {"stat": "p50", "label": "p50"}],
+                  ["...", {"stat": "p99", "label": "p99"}]
+                ],
+                "view": "timeSeries", "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric", "x": 16, "y": 14, "width": 8, "height": 6,
+              "properties": {
+                "title": "DynamoDB capacity (patients / audit)",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "securehealth-patients"],
+                  [".", "ConsumedWriteCapacityUnits", ".", "."],
+                  [".", "ConsumedWriteCapacityUnits", ".", "securehealth-audit", {"label": "Audit writes"}]
+                ],
+                "view": "timeSeries", "stat": "Sum", "period": 300,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "log", "x": 0, "y": 20, "width": 24, "height": 8,
+              "properties": {
+                "title": "Recent security events (denials, rejections, tamper alerts)",
+                "query": "SOURCE '/aws/lambda/securehealth-patients' | fields @timestamp, action, outcome, role, user, patient_id | filter event = 'SECURITY_EVENT' and (denied = 1 or blocked = 1 or alert = 1) | sort @timestamp desc | limit 50",
+                "region": "${AWS::Region}",
+                "view": "table"
+              }
+            }
+          ]
+        }
+
 Outputs:
   ApiUrl:
     Description: Base URL for the SecureHealth API
@@ -260,3 +546,9 @@ Outputs:
     Value: !Ref UserPoolClient
   KmsKeyId:
     Value: !Ref DataKey
+  DashboardUrl:
+    Description: CloudWatch security dashboard
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=SecureHealth-Security'
+  AlertTopicArn:
+    Description: Subscribe an email here to receive security alarms
+    Value: !Ref SecurityAlertTopic

@@ -244,6 +244,28 @@ def write_audit(username, role, action, outcome, patient_id=None, detail=None):
     except ClientError as exc:                      # never let logging break the request
         print(f"[AUDIT-FAIL] {action}/{outcome}: {exc}")
 
+    emit_security_event(username, role, action, outcome, patient_id)
+
+
+def emit_security_event(username, role, action, outcome, patient_id=None):
+    """Print one structured JSON line per security event.
+
+    CloudWatch metric filters parse these lines into custom metrics, which drive
+    the SecureHealth dashboard and the alarms on denied access and tampering.
+    A log line is cheap and cannot fail the request, unlike a PutMetricData call.
+    """
+    print(json.dumps({
+        "event": "SECURITY_EVENT",
+        "action": action,
+        "outcome": outcome,
+        "role": role or "NONE",
+        "user": username,
+        "patient_id": patient_id or "",
+        "denied": outcome.startswith("DENIED"),
+        "blocked": outcome == "BLOCKED",
+        "alert": outcome == "ALERT",
+    }))
+
 
 # ----------------------------------------------------------------------------
 # HTTP responses
