@@ -70,3 +70,10 @@ infrastructure activity including every KMS key use.
 - Audit immutability relies on application design plus IAM; S3 Object Lock export
   would make it cryptographically tamper-evident.
 - Rate limiting is per-method, not per-user; AWS WAF would add per-identity limits.
+- The frontend CSP permits `unsafe-inline` and `unsafe-eval` because the Next.js
+  development server requires them for hot module replacement and injected
+  styles. A production build (`npm run build && npm start`) with nonce-based CSP
+  removes both; this was verified as the only remaining ZAP finding after the
+  header remediation, and all four original findings (missing CSP, missing
+  anti-clickjacking header, `X-Powered-By` leak, missing `nosniff`) were fixed
+  in `frontend/next.config.js`.
