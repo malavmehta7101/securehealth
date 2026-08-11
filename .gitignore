@@ -24,3 +24,4 @@ aws-exports.js
 .vscode/
 .idea/
 .DS_Store
+token.txt

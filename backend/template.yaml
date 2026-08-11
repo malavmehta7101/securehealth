@@ -123,9 +123,30 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
+  # ---------------- API Gateway account-level logging role ----------------
+  # One-time-per-account/region setting: API Gateway can only write access logs
+  # to CloudWatch if this role ARN is registered at the account level.
+  ApiGatewayLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: apigateway.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayLoggingRole.Arn
+
   # ---------------- REST API with Cognito authorizer ----------------
   Api:
     Type: AWS::Serverless::Api
+    DependsOn: ApiGatewayAccount
     Properties:
       Name: securehealth-api
       StageName: v1
@@ -171,6 +192,58 @@ Resources:
             RestApiId: !Ref Api
             Path: /health
             Method: get
+
+  # ---------------- Lambda: patient records CRUD ----------------
+  PatientsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: securehealth-patients
+      Handler: patients.handler
+      CodeUri: src/handlers/
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref PatientsTable }
+        - DynamoDBWritePolicy: { TableName: !Ref AuditTable }
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Encrypt
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt DataKey.Arn
+      Events:
+        Create:
+          Type: Api
+          Properties: { RestApiId: !Ref Api, Path: /patients, Method: post }
+        Search:
+          Type: Api
+          Properties: { RestApiId: !Ref Api, Path: /patients, Method: get }
+        Read:
+          Type: Api
+          Properties: { RestApiId: !Ref Api, Path: "/patients/{id}", Method: get }
+        Update:
+          Type: Api
+          Properties: { RestApiId: !Ref Api, Path: "/patients/{id}", Method: put }
+
+  # ---------------- Lambda: audit log reader (Admin only) ----------------
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: securehealth-audit
+      Handler: audit.handler
+      CodeUri: src/handlers/
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref AuditTable }
+        - DynamoDBWritePolicy: { TableName: !Ref AuditTable }
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt DataKey.Arn
+      Events:
+        ReadAudit:
+          Type: Api
+          Properties: { RestApiId: !Ref Api, Path: /audit, Method: get }
 
 Outputs:
   ApiUrl:

@@ -1,0 +1,47 @@
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/README.md b/README.md[m
+[1mindex 367e5fc..d5f9c86 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -40,41 +40,6 @@[m [mall point at his stack outputs.[m
+ (ApiUrl, UserPoolId, ClientId) lives in `frontend/.env.local`, which is[m
+ gitignored — Malav shares the canonical demo values in the team chat, not in git.[m
+ [m
+[31m-## One-time AWS account setup (each member, before first deploy)[m
+[31m-[m
+[31m-API Gateway can only write access logs if an account-level CloudWatch role is[m
+[31m-registered. This is per AWS account + region, not per stack, so every member[m
+[31m-runs it once. Skipping it makes `sam deploy` fail with[m
+[31m-"CloudWatch Logs role ARN must be set in account settings".[m
+[31m-[m
+[31m-```powershell[m
+[31m-# 1. Trust policy file[m
+[31m-@'[m
+[31m-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"apigateway.amazonaws.com"},"Action":"sts:AssumeRole"}]}[m
+[31m-'@ | Out-File -Encoding ascii trust-policy.json[m
+[31m-[m
+[31m-# 2. Create the role[m
+[31m-aws iam create-role --role-name APIGatewayCloudWatchLogs --assume-role-policy-document file://trust-policy.json[m
+[31m-[m
+[31m-# 3. Attach the managed policy[m
+[31m-aws iam attach-role-policy --role-name APIGatewayCloudWatchLogs --policy-arn arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs[m
+[31m-[m
+[31m-# 4. Wait ~30s for IAM propagation, then register it (replace ACCOUNT_ID with your own)[m
+[31m-aws apigateway update-account --patch-operations op=replace,path=/cloudwatchRoleArn,value=arn:aws:iam::ACCOUNT_ID:role/APIGatewayCloudWatchLogs --region ca-central-1[m
+[31m-```[m
+[31m-[m
+[31m-Your ACCOUNT_ID: `aws sts get-caller-identity --query Account --output text`[m
+[31m-[m
+[31m-## Troubleshooting[m
+[31m-[m
+[31m-- **`sam: command not found` in Git Bash** — the installer ships `sam.cmd`; use PowerShell, or `alias sam='sam.cmd'`.[m
+[31m-- **Stack stuck in ROLLBACK_COMPLETE** — it can't be updated, only deleted:[m
+[31m-  `aws cloudformation delete-stack --stack-name securehealth --region ca-central-1`, then[m
+[31m-  `aws cloudformation wait stack-delete-complete --stack-name securehealth --region ca-central-1`, then redeploy.[m
+[31m-- **Python runtime mismatch on `sam build`** — the template targets python3.13; install it or adjust `Runtime:` to a version you have.[m
+[31m-- **502 from an endpoint** — check `sam logs --stack-name securehealth --region ca-central-1`. KMS AccessDenied means the function's IAM policy is missing `kms:Decrypt` / `kms:GenerateDataKey` on the CMK.[m
+[31m-- **Use your OWN AWS account.** Malav's stack is the canonical demo environment; don't deploy into it.[m
+[31m-  [m
+ ## Deploy the skeleton (Phase 1 gate)[m
+ [m
+ ```bash[m

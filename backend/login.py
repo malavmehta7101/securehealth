@@ -48,12 +48,29 @@ def main():
     # 2) Enrol a TOTP authenticator (only happens once per user)
     if resp.get("ChallengeName") == "MFA_SETUP":
         assoc = idp.associate_software_token(Session=resp["Session"])
-        print("\nAdd this secret to your authenticator app (manual entry):")
+        print("\n" + "=" * 60)
+        print("SECRET KEY (add to your authenticator app FIRST):")
         print("   ", assoc["SecretCode"])
-        code = input("Enter the 6-digit code from the app: ").strip()
-        verify = idp.verify_software_token(
-            Session=assoc["Session"], UserCode=code, FriendlyDeviceName="securehealth-cli"
-        )
+        print("=" * 60)
+        print("In your app: Add account -> Enter setup key -> paste the above")
+        print("Name it 'securehealth-%s', type: Time-based\n" % username)
+        input("Press Enter once the account is added and showing a code...")
+
+        session = assoc["Session"]
+        verify = None
+        for attempt in range(1, 6):
+            code = input(f"Enter the CURRENT 6-digit code (attempt {attempt}/5): ").strip()
+            try:
+                verify = idp.verify_software_token(
+                    Session=session, UserCode=code, FriendlyDeviceName="securehealth-cli"
+                )
+                break
+            except idp.exceptions.EnableSoftwareTokenMFAException:
+                print("  Code mismatch. Wait for the app to show a NEW code, then retry.")
+                print("  (If it keeps failing, your PC clock may be off - see README.)")
+        if verify is None:
+            sys.exit("MFA setup failed after 5 attempts.")
+
         resp = idp.respond_to_auth_challenge(
             ClientId=CLIENT_ID,
             ChallengeName="MFA_SETUP",
@@ -74,6 +91,9 @@ def main():
     token = resp["AuthenticationResult"]["IdToken"]
     print("\n=== IdToken (expires in 1 hour) ===")
     print(token)
+    with open("token.txt", "w") as f:
+        f.write(token)
+    print("\nSaved to token.txt")
     print("\nTest it with:")
     print(f'  curl.exe -i https://z4pz9ha8j6.execute-api.{REGION}.amazonaws.com/v1/health -H "Authorization: Bearer <token>"')
 

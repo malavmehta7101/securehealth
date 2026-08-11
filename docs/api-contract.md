@@ -36,8 +36,8 @@ deny-by-default. The UI hiding a button is not a control.
   "health_card": "string, 10 digits (fictional OHIP-style)",
   "email": "RFC 5322 basic pattern, max 254",
   "phone": "string, 10 digits",
-  "clinical_notes": "string max 5000 — ENCRYPTED at rest (AES-256-GCM)",
-  "allergies":      "string max 1000 — ENCRYPTED at rest",
+  "clinical_notes": "string max 2000 — ENCRYPTED at rest (AES-256-GCM via KMS)",
+  "allergies":      "string max 500 — ENCRYPTED at rest",
   "integrity": "server-managed SHA-256 hex — never accepted from client",
   "created_at": "ISO 8601, server-set",
   "updated_at": "ISO 8601, server-set"
