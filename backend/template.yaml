@@ -8,7 +8,7 @@ Description: >
 
 Globals:
   Function:
-    Runtime: python3.12
+    Runtime: python3.13
     Timeout: 10
     MemorySize: 256
     Architectures: [x86_64]
@@ -158,6 +158,12 @@ Resources:
       CodeUri: src/handlers/
       Policies:
         - DynamoDBWritePolicy: { TableName: !Ref AuditTable }
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt DataKey.Arn
       Events:
         Health:
           Type: Api
