@@ -9,9 +9,149 @@ Cinderella covers testing.
 
 ---
 
+## The repository
+
+Everything lives in one Git repository. It is the single source of truth: if a
+change isn't committed, it doesn't exist — we lost the same CORS fix three
+times to files being copied over a working directory.
+
+**Repo:** `https://github.com/malavmehta7101/securehealth`
+
+### Getting a copy
+
+```bash
+git clone https://github.com/malavmehta7101/securehealth.git
+cd securehealth
+```
+
+Clone to a plain local path such as `C:\dev\` — **not** into OneDrive, Dropbox
+or any synced folder. Sync clients lock files inside `.git` mid-operation and
+corrupt the repository.
+
+### What is in it
+
+```
+backend/              The AWS application
+  template.yaml       Infrastructure as code — the entire stack in one file
+  src/handlers/       common.py holds the shared security pipeline;
+                      patients.py, audit.py and health.py are the endpoints
+  tests/              145 tests, each marked with its STRIDE category
+  login.py            First login and MFA enrolment for one account
+  get_tokens.py       Signs in as all three roles, writes .test-env
+frontend/             Next.js dashboard
+  lib/auth.ts         Cognito sign-in, MFA challenges, role from the token claim
+  lib/api.ts          Fetch wrapper that attaches the bearer token
+  app/                Login page and the role-aware dashboard
+iot/                  Equipment-monitoring extension — a separate stack
+docs/
+  api-contract.md     The contract between frontend and backend
+  TEST-MATRIX.md      Every test mapped to a threat and a control
+  PHASE2.md           Security implementation notes
+  MONITORING.md       Metrics, alarms and the dashboard
+  evidence/           Screenshots and scan reports, with an index
+README.md             Setup, deployment and troubleshooting
+WALKTHROUGH.md        This file
+```
+
+Two files deserve a mention on their own if anyone asks during Q&A:
+
+- **`backend/src/handlers/common.py`** — the security pipeline every request
+  runs through: identity from validated claims, deny-by-default authorisation,
+  whitelist validation, KMS encryption, SHA-256 verification, audit write. If a
+  grader wants to see "where the security is", this is the file.
+- **`backend/template.yaml`** — every security setting is declared here rather
+  than clicked into a console, so the configuration is reviewable in version
+  control and reproducible in any AWS account.
+
+### What is deliberately **not** in it
+
+`.gitignore` keeps all of these out, and they should never appear in a commit:
+
+| Excluded | Why |
+|---|---|
+| `frontend/.env.local` | Stack-specific configuration |
+| `backend/.test-env`, `token.txt` | Live bearer tokens |
+| `iot/certs/`, `iot/firmware/secrets.h` | Device private keys and Wi-Fi credentials |
+| `node_modules/`, `.aws-sam/`, `__pycache__/` | Build output |
+
+If you ever commit a credential by accident, treat it as compromised: rotate it
+first, then remove it from the repo.
+
+### Working in it day to day
+
+```bash
+git pull                                  # start every session with this
+# ... make changes ...
+git add -A
+git commit -m "Short description of what changed and why"
+git push
+```
+
+Rules the team agreed on:
+
+- **Infrastructure changes go in a commit**, never as a manual edit to a local
+  copy. This is the lesson that cost us three separate debugging sessions.
+- `docs/api-contract.md` is the contract — changes need agreement from Malav
+  and Robert, because both the frontend and the backend build against it.
+- Capture evidence screenshots into `docs/evidence/` **as you work**, not at the
+  end, and name them with the numbering in that folder's README.
+
+### Running it from a fresh clone
+
+Someone with no prior setup can go from clone to working system by following
+`README.md`. In short:
+
+```bash
+# One-time AWS account setup (README has the exact commands)
+cd backend
+sam build && sam deploy --guided     # deploys to your own AWS account
+python login.py admin1               # set the password and enrol MFA
+
+cd ../frontend
+npm install
+cp .env.local.example .env.local     # fill in from the stack outputs
+npm run dev
+```
+
+Each team member deploys into **their own AWS account**. Malav's deployment is
+the canonical demo environment — the recorded demo and the presentation both
+point at it.
+
+### For the submission
+
+If the repository is submitted alongside the report, say so on the title slide
+and mention that it contains the infrastructure as code, the test suite and the
+evidence folder. Those three demonstrate "a working system, not just a design"
+far better than screenshots alone.
+
+Before handing over the link, check: repository visibility is set the way the
+team intends, `git status` is clean, and the latest commit is pushed.
+
+---
+
 ## Before you start (do this 15 minutes early)
 
 Nothing here should happen on camera.
+
+### Use Git Bash, not PowerShell
+
+Every command in this walkthrough is written for **Git Bash**. `source .test-env`
+is a bash builtin — in PowerShell it silently does nothing, leaving `$API` and
+the token variables empty, and curl then fails with
+`curl: (3) URL rejected: No host part in the URL`.
+
+In VS Code, open the terminal dropdown next to `+` and choose **Git Bash**.
+
+If you must use PowerShell, load the same values natively and remember that
+environment variables need the `$env:` prefix there:
+
+```powershell
+Get-Content .test-env | ForEach-Object { if ($_ -match '^export (\w+)="(.*)"$') { Set-Item -Path "env:$($matches[1])" -Value $matches[2] } }
+$API = "https://z4pz9ha8j6.execute-api.ca-central-1.amazonaws.com/v1"
+# then use $env:SECUREHEALTH_ADMIN_TOKEN instead of $SECUREHEALTH_ADMIN_TOKEN
+```
+
+### Setup
 
 ```bash
 # 1. Frontend running
@@ -28,7 +168,9 @@ API=https://z4pz9ha8j6.execute-api.ca-central-1.amazonaws.com/v1
 Checklist:
 
 - [ ] `npm run dev` running, browser open at `localhost:3000`, signed **out**
-- [ ] Terminal ready, tokens loaded, `$API` set
+- [ ] Terminal is **Git Bash**, tokens loaded, `$API` set
+- [ ] Verified with `echo $API` and `echo ${#SECUREHEALTH_ADMIN_TOKEN}`
+      (expect the URL, and a length around 1000 — `0` means the tokens didn't load)
 - [ ] AWS console open in a second browser tab, region **Canada (Central)**,
       on DynamoDB → `securehealth-patients` → Explore items
 - [ ] Third tab on the CloudWatch dashboard `SecureHealth-Security`
@@ -37,6 +179,7 @@ Checklist:
 - [ ] Authenticator app open on your phone
 - [ ] Terminal font size increased for the recording
 - [ ] Backup video ready to play if the network fails
+- [ ] `git status` clean and everything pushed — the repo link may be shared on the day
 
 **Patient id used throughout:**
 `2c8500aa-1eed-44dc-b1e7-000ea0fb1f8c` (Sarah Chen)
@@ -259,6 +402,7 @@ python simulate_device.py --endpoint <data-endpoint> --scenario spoof --count 3
 
 | Symptom | Fix |
 |---|---|
+| `curl: (3) URL rejected: No host part in the URL` | You are in PowerShell, not Git Bash — the variables are empty. Switch terminal and re-run `source .test-env` |
 | `401` on a call that should work | Token expired. `python get_tokens.py && source .test-env` |
 | Frontend shows no data | Session expired — sign out and back in. Otherwise check the browser console for CORS |
 | Patient list unexpectedly empty | A record is still tampered from a rehearsal. Restore `first_name` to `Sarah` |
