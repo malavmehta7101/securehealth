@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SecureHealth IoT extension - secure equipment monitoring.
+  A separate stack from the graded application: an ESP32 (or simulator)
+  publishes refrigerator temperature over MQTT with mutual TLS to AWS IoT Core,
+  which routes readings into DynamoDB and raises alerts when a reading leaves
+  the safe range. Deployed independently so the main securehealth stack is
+  never at risk.
+
+Parameters:
+  DeviceName:
+    Type: String
+    Default: securehealth-fridge-01
+    Description: Logical name of the monitored unit (the IoT thing).
+  MinSafeC:
+    Type: Number
+    Default: 2
+    Description: Lower bound of the safe storage range, in Celsius.
+  MaxSafeC:
+    Type: Number
+    Default: 8
+    Description: Upper bound of the safe storage range, in Celsius.
+  UserPoolId:
+    Type: String
+    Description: >-
+      Cognito user pool id from the main securehealth stack. Passed as a
+      parameter rather than imported, so this stack can be deployed and deleted
+      without creating a dependency on the graded application stack.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    MemorySize: 256
+
+Resources:
+
+  # ---------------- Device identity ----------------
+  # The thing is the device's registry entry. Its certificate is created out of
+  # band (see iot/README.md) because a private key must never appear in a
+  # template or in version control.
+  MonitorThing:
+    Type: AWS::IoT::Thing
+    Properties:
+      ThingName: !Ref DeviceName
+
+  # Least-privilege policy: this device may connect only under its own client
+  # id, publish only to its own telemetry topic, and subscribe to nothing.
+  # A stolen certificate therefore cannot read other devices' data or
+  # impersonate another unit.
+  MonitorPolicy:
+    Type: AWS::IoT::Policy
+    Properties:
+      PolicyName: !Sub '${DeviceName}-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: iot:Connect
+            Resource: !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:client/${DeviceName}'
+          - Effect: Allow
+            Action: iot:Publish
+            Resource: !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/securehealth/telemetry/${DeviceName}'
+
+  # ---------------- Telemetry storage ----------------
+  TelemetryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: securehealth-telemetry
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: device_id, AttributeType: S }
+        - { AttributeName: reading_time, AttributeType: S }
+      KeySchema:
+        - { AttributeName: device_id, KeyType: HASH }
+        - { AttributeName: reading_time, KeyType: RANGE }
+      SSESpecification:
+        SSEEnabled: true          # AWS-managed key: telemetry is operational, not PHI
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true             # readings age out after 30 days
+
+  # ---------------- Ingest: IoT rule -> Lambda ----------------
+  # The rule is the trust boundary crossing. Everything upstream of it is an
+  # untrusted device; everything downstream runs with an IAM role.
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: securehealth-telemetry-ingest
+      Handler: ingest.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          TELEMETRY_TABLE: !Ref TelemetryTable
+          ALERT_TOPIC: !Ref TelemetryAlertTopic
+          MIN_SAFE_C: !Ref MinSafeC
+          MAX_SAFE_C: !Ref MaxSafeC
+      Policies:
+        - DynamoDBWritePolicy: { TableName: !Ref TelemetryTable }
+        - SNSPublishMessagePolicy: { TopicName: !GetAtt TelemetryAlertTopic.TopicName }
+      Events:
+        Telemetry:
+          Type: IoTRule
+          Properties:
+            AwsIotSqlVersion: '2016-03-23'
+            Sql: !Sub >-
+              SELECT *, topic(3) AS device_id, timestamp() AS received_at
+              FROM 'securehealth/telemetry/+'
+
+  TelemetryAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: securehealth-equipment-alerts
+      DisplayName: SecureHealth Equipment Alerts
+
+  # ---------------- Read API for the dashboard ----------------
+  ReadingsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: securehealth-telemetry-readings
+      Handler: readings.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          TELEMETRY_TABLE: !Ref TelemetryTable
+          MIN_SAFE_C: !Ref MinSafeC
+          MAX_SAFE_C: !Ref MaxSafeC
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref TelemetryTable }
+      Events:
+        Readings:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TelemetryApi
+            Path: /telemetry
+            Method: get
+
+  # Reuses the same Cognito user pool as the main stack, so the existing
+  # staff accounts and roles apply here without a second identity system.
+  TelemetryApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: securehealth-telemetry-api
+      StageName: v1
+      Cors:
+        AllowMethods: "'GET,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}' 
+
+  # ---------------- Monitoring ----------------
+  OutOfRangeMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${IngestFunction}'
+      FilterPattern: '{ $.event = "TELEMETRY_ALERT" }'
+      MetricTransformations:
+        - MetricNamespace: SecureHealth/Equipment
+          MetricName: OutOfRangeReadings
+          MetricValue: '1'
+          DefaultValue: 0
+
+  RejectedDeviceMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${IngestFunction}'
+      FilterPattern: '{ $.event = "TELEMETRY_REJECTED" }'
+      MetricTransformations:
+        - MetricNamespace: SecureHealth/Equipment
+          MetricName: RejectedReadings
+          MetricValue: '1'
+          DefaultValue: 0
+
+  OutOfRangeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-EquipmentOutOfRange
+      AlarmDescription: A monitored storage unit reported a temperature outside its safe range.
+      Namespace: SecureHealth/Equipment
+      MetricName: OutOfRangeReadings
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref TelemetryAlertTopic]
+
+  # Malformed or out-of-schema payloads suggest a compromised or spoofed device.
+  RejectedReadingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SecureHealth-EquipmentRejectedReadings
+      AlarmDescription: Three or more telemetry payloads failed validation in five minutes.
+      Namespace: SecureHealth/Equipment
+      MetricName: RejectedReadings
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref TelemetryAlertTopic]
+
+Outputs:
+  ThingName:
+    Value: !Ref DeviceName
+  PolicyName:
+    Value: !Ref MonitorPolicy
+  TelemetryTable:
+    Value: !Ref TelemetryTable
+  TelemetryApiUrl:
+    Description: Authenticated endpoint for recent readings
+    Value: !Sub 'https://${TelemetryApi}.execute-api.${AWS::Region}.amazonaws.com/v1/telemetry'
+  AlertTopicArn:
+    Value: !Ref TelemetryAlertTopic
+  MqttTopic:
+    Description: Topic this device is permitted to publish to
+    Value: !Sub 'securehealth/telemetry/${DeviceName}'
