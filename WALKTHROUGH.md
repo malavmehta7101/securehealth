@@ -174,6 +174,8 @@ Checklist:
 - [ ] AWS console open in a second browser tab, region **Canada (Central)**,
       on DynamoDB → `securehealth-patients` → Explore items
 - [ ] Third tab on the CloudWatch dashboard `SecureHealth-Security`
+- [ ] `docs/evidence/zap-02-before-remediation.pdf` and `zap-03-after-remediation.pdf`
+      already open in tabs — do not re-run ZAP live, a scan takes minutes
 - [ ] Sarah Chen's `first_name` reads **Sarah** (not `Eve`) — the demo tampers
       it live, so it must start clean
 - [ ] Authenticator app open on your phone
@@ -375,6 +377,46 @@ python -m pytest tests/ -q
 
 ---
 
+## Step 11 — Security scans (Cinderella, 30 s)
+
+Don't re-run ZAP live — a full scan takes several minutes. Show the saved
+reports instead. Have both PDFs already open in tabs before you start.
+
+**Bandit — run it live, it takes two seconds:**
+
+```bash
+python -m bandit -r src/handlers/
+```
+
+**Expect:** `No issues identified.` · `Total lines of code: 428`
+
+> "Static analysis across all our handler code — no issues at any severity.
+> That's not luck: no secrets in source, SHA-256 rather than MD5, JSON parsing
+> rather than pickle, and no shell calls anywhere."
+
+**ZAP — show the two saved reports side by side:**
+
+*[open `docs/evidence/zap-02-before-remediation.pdf`]*
+
+> "We also ran OWASP ZAP against the running frontend. No high-risk findings.
+> Four were actionable — a missing content security policy, a missing
+> anti-clickjacking header, a framework version leaking in a response header,
+> and a missing nosniff header."
+
+*[switch to `docs/evidence/zap-03-after-remediation.pdf`]*
+
+> "We fixed all four and re-scanned. What's left is the content security policy
+> allowing inline scripts, which the Next.js development server requires — a
+> production build removes it. We documented that rather than claiming a clean
+> sheet."
+
+**The point worth making:** every one of those findings was on the frontend
+delivery layer. The API — where the patient data actually lives — already
+returned the full set of security headers, and our integration tests check that
+on every run.
+
+---
+
 ## Optional — IoT extension (2 min, only if time allows)
 
 Built after the assessed scope. Skip without hesitation if running long.
@@ -406,6 +448,7 @@ python simulate_device.py --endpoint <data-endpoint> --scenario spoof --count 3
 | `401` on a call that should work | Token expired. `python get_tokens.py && source .test-env` |
 | Frontend shows no data | Session expired — sign out and back in. Otherwise check the browser console for CORS |
 | Patient list unexpectedly empty | A record is still tampered from a rehearsal. Restore `first_name` to `Sarah` |
+| ZAP scan started by accident | Stop it. Close the tab and show the saved PDFs — the scan takes minutes and will eat your slot |
 | Dashboard graphs flat | Metrics lag 2–3 minutes. Say so and move on — the alarms list still proves the control |
 | Anything else | Switch to the backup video. Don't debug on stage |
 
